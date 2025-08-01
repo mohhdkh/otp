@@ -4,27 +4,23 @@ const bodyParser = require('body-parser');
 const cors = require('cors');
 
 const app = express();
-const port = 3000;
+const port = process.env.PORT || 3000; // ✅ تعديل ضروري
 
-// تفعيل CORS و body-parser
 app.use(cors());
 app.use(bodyParser.json());
 
-// إعداد بيانات SMTP (استبدلها ببياناتك)
 const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
-    user: 'mohhdkh2@gmail.com',      // البريد الإلكتروني
-    pass: 'wmsu lhvw gwwg iupk',         // كلمة مرور التطبيق (App Password)
+    user: 'mohhdkh2@gmail.com',
+    pass: 'wmsu lhvw gwwg iupk', // ⚠️ لا تضع بياناتك الحقيقية هنا في الإنتاج
   },
 });
 
-// دالة توليد كود تحقق 6 أرقام
 function generateOTP() {
   return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
-// نقطة API لإرسال كود التحقق
 app.post('/send-otp', async (req, res) => {
   const { email } = req.body;
 
@@ -43,11 +39,16 @@ app.post('/send-otp', async (req, res) => {
 
   try {
     await transporter.sendMail(mailOptions);
-    res.json({ success: true, message: 'تم إرسال رمز التحقق', otp }); // يمكنك حذف otp من الرد في الإنتاج
+    res.json({ success: true, message: 'تم إرسال رمز التحقق', otp }); // ⚠️ احذف otp من الرد في الإنتاج
   } catch (error) {
     console.error('خطأ في إرسال البريد:', error);
     res.status(500).json({ success: false, error: 'فشل في إرسال البريد' });
   }
+});
+
+// Route تجريبي للتأكد أن السيرفر شغال
+app.get("/", (req, res) => {
+  res.send("Server is running ✅");
 });
 
 app.listen(port, () => {
