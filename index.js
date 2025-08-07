@@ -3,7 +3,7 @@ const nodemailer = require('nodemailer');
 const bodyParser = require('body-parser');
 const cors = require('cors');
 const admin = require('firebase-admin');
-const serviceAccount = require('./najdah-17dba-firebase-adminsdk-fbsvc-31c8259b85');
+const serviceAccount = require('./najdah-17dba-firebase-adminsdk-fbsvc-31c8259b85.json');
 
 const app = express();
 const port = process.env.PORT || 3000;
