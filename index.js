@@ -3,7 +3,9 @@ const nodemailer = require('nodemailer');
 const bodyParser = require('body-parser');
 const cors = require('cors');
 const admin = require('firebase-admin');
+
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+
 const app = express();
 const port = process.env.PORT || 3000;
 
@@ -20,7 +22,7 @@ const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
     user: 'mohhdkh2@gmail.com',
-    pass: 'wmsu lhvw gwwg iupk',
+    pass: 'wmsu lhvw gwwg iupk', // استخدم كلمة مرور التطبيق أو المتغيرات البيئية
   },
 });
 
@@ -29,15 +31,15 @@ function generateOTP() {
 }
 
 app.post('/send-otp', async (req, res) => {
-  const { email } = req.body;
+  const { email, purpose } = req.body;
 
-  if (!email) {
-    console.log('لم يتم تقديم البريد الإلكتروني');
-    return res.status(400).json({ error: 'يجب تقديم البريد الإلكتروني' });
+  if (!email || !purpose) {
+    console.log('لم يتم تقديم البريد الإلكتروني أو الغرض');
+    return res.status(400).json({ error: 'يجب تقديم البريد الإلكتروني والغرض' });
   }
 
   const otp = generateOTP();
-  console.log(`تم إنشاء OTP: ${otp} للبريد: ${email}`);
+  console.log(`تم إنشاء OTP: ${otp} للبريد: ${email} والغرض: ${purpose}`);
 
   const mailOptions = {
     from: 'mohhdkh2@gmail.com',
@@ -52,6 +54,7 @@ app.post('/send-otp', async (req, res) => {
 
     await db.collection('otps').doc(email).set({
       otp,
+      purpose,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
     console.log('تم حفظ OTP في Firestore');
@@ -64,11 +67,11 @@ app.post('/send-otp', async (req, res) => {
 });
 
 app.post('/verify-otp', async (req, res) => {
-  const { email, otp } = req.body;
+  const { email, otp, purpose } = req.body;
 
-  if (!email || !otp) {
-    console.log('البريد الإلكتروني أو رمز التحقق مفقود');
-    return res.status(400).json({ success: false, message: 'البريد الإلكتروني ورمز التحقق مطلوبان' });
+  if (!email || !otp || !purpose) {
+    console.log('البريد الإلكتروني أو رمز التحقق أو الغرض مفقود');
+    return res.status(400).json({ success: false, message: 'جميع الحقول مطلوبة' });
   }
 
   try {
@@ -83,6 +86,11 @@ app.post('/verify-otp', async (req, res) => {
     if (!data.createdAt) {
       console.log('createdAt غير موجود في الوثيقة');
       return res.status(500).json({ success: false, message: 'خطأ في بيانات رمز التحقق' });
+    }
+
+    if (data.purpose !== purpose) {
+      console.log(`الغرض غير متطابق. متوقع: ${purpose}، لكن الموجود: ${data.purpose}`);
+      return res.status(400).json({ success: false, message: 'الغرض غير صحيح' });
     }
 
     const createdAt = data.createdAt.toDate();
@@ -109,7 +117,7 @@ app.post('/verify-otp', async (req, res) => {
 });
 
 app.get("/", (req, res) => {
-  res.send("Server isS running ✅");
+  res.send("Server is running ✅");
 });
 
 app.listen(port, () => {
