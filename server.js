@@ -3,6 +3,11 @@ import cors from 'cors';
 import admin from 'firebase-admin';
 import dotenv from 'dotenv';
 import {
+  AppsScriptDeliveryError,
+  appsScriptFailureLog,
+  sendOtpWithAppsScript,
+} from './apps_script_delivery.js';
+import {
   OTP_EXPIRY_MS,
   OTP_MAX_ATTEMPTS,
   evaluateOtpRecord,
@@ -20,7 +25,6 @@ dotenv.config();
 const OTP_COLLECTION = 'otps';
 const RATE_LIMIT_COLLECTION = 'otpRateLimits';
 const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
-const APPS_SCRIPT_TIMEOUT_MS = 10 * 1000;
 
 const SEND_RATE_LIMITS = {
   perEmailAndPurpose: 5,
@@ -85,7 +89,7 @@ async function enforceRateLimits(rules) {
       .doc(rateLimitDocumentId(scope, key)),
   );
 
-  await db.runTransaction(async (transaction) => {
+  return db.runTransaction(async (transaction) => {
     const snapshots = await Promise.all(refs.map((ref) => transaction.get(ref)));
     const updates = [];
 
@@ -118,6 +122,44 @@ async function enforceRateLimits(rules) {
     for (const update of updates) {
       transaction.set(update.ref, update.data);
     }
+
+    return updates.map((update) => ({
+      ref: update.ref,
+      windowStartedAt: update.data.windowStartedAt.toMillis(),
+    }));
+  });
+}
+
+async function releaseRateLimitReservations(reservations) {
+  if (!reservations?.length) {
+    return;
+  }
+
+  await db.runTransaction(async (transaction) => {
+    const snapshots = await Promise.all(
+      reservations.map(({ ref }) => transaction.get(ref)),
+    );
+
+    for (let index = 0; index < reservations.length; index += 1) {
+      const reservation = reservations[index];
+      const snapshot = snapshots[index];
+      if (!snapshot.exists) {
+        continue;
+      }
+
+      const data = snapshot.data();
+      const windowStartedAt = data?.windowStartedAt?.toMillis?.();
+      const count = Number(data?.count ?? 0);
+      if (windowStartedAt !== reservation.windowStartedAt || count <= 0) {
+        continue;
+      }
+
+      if (count === 1) {
+        transaction.delete(reservation.ref);
+      } else {
+        transaction.update(reservation.ref, { count: count - 1 });
+      }
+    }
   });
 }
 
@@ -142,32 +184,6 @@ async function deleteOtpIfUnchanged(ref, otpHash) {
       transaction.delete(ref);
     }
   });
-}
-
-async function sendOtpWithAppsScript({ email, otp, purpose }) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), APPS_SCRIPT_TIMEOUT_MS);
-
-  try {
-    const response = await fetch(appsScriptUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        secret: appsScriptSecret,
-        email,
-        code: otp,
-        purpose,
-      }),
-      signal: controller.signal,
-    });
-
-    const data = await response.json().catch(() => null);
-    if (!response.ok || data?.ok !== true) {
-      throw new Error('Apps Script rejected OTP delivery');
-    }
-  } finally {
-    clearTimeout(timeout);
-  }
 }
 
 async function consumeOtp({ email, purpose, otp }) {
@@ -210,6 +226,9 @@ async function consumeOtp({ email, purpose, otp }) {
 
 app.post('/send-otp', async (req, res) => {
   const { email, purpose } = requestData(req);
+  let rateLimitReservations;
+  let otpRef;
+  let otpHash;
 
   if (!isValidEmail(email) || !isAllowedPurpose(purpose)) {
     return res.status(400).json({
@@ -219,7 +238,7 @@ app.post('/send-otp', async (req, res) => {
   }
 
   try {
-    await enforceRateLimits([
+    rateLimitReservations = await enforceRateLimits([
       {
         scope: 'send-email-purpose',
         key: `${email}\0${purpose}`,
@@ -233,8 +252,8 @@ app.post('/send-otp', async (req, res) => {
     ]);
 
     const otp = generateOtp();
-    const otpHash = hashOtp(email, purpose, otp, otpHashSecret);
-    const otpRef = db
+    otpHash = hashOtp(email, purpose, otp, otpHashSecret);
+    otpRef = db
       .collection(OTP_COLLECTION)
       .doc(otpDocumentId(email, purpose));
     const nowMs = Date.now();
@@ -256,12 +275,13 @@ app.post('/send-otp', async (req, res) => {
     }
     await batch.commit();
 
-    try {
-      await sendOtpWithAppsScript({ email, otp, purpose });
-    } catch (error) {
-      await deleteOtpIfUnchanged(otpRef, otpHash);
-      throw error;
-    }
+    await sendOtpWithAppsScript({
+      url: appsScriptUrl,
+      secret: appsScriptSecret,
+      email,
+      otp,
+      purpose,
+    });
 
     return res.json({
       success: true,
@@ -275,7 +295,25 @@ app.post('/send-otp', async (req, res) => {
       });
     }
 
-    console.error('Failed to send OTP');
+    const cleanupTasks = [];
+    if (otpRef && otpHash) {
+      cleanupTasks.push(deleteOtpIfUnchanged(otpRef, otpHash));
+    }
+    if (rateLimitReservations) {
+      cleanupTasks.push(releaseRateLimitReservations(rateLimitReservations));
+    }
+
+    const cleanupResults = await Promise.allSettled(cleanupTasks);
+    if (cleanupResults.some((result) => result.status === 'rejected')) {
+      console.error('Failed to fully clean up an unsuccessful OTP send');
+    }
+
+    if (error instanceof AppsScriptDeliveryError) {
+      console.error('Apps Script OTP delivery failed', appsScriptFailureLog(error));
+    } else {
+      console.error('Failed to send OTP');
+    }
+
     return res.status(500).json({
       success: false,
       message: 'فشل في إرسال رمز التحقق',
