@@ -1,9 +1,11 @@
 {
   "name": "otp-email-server",
   "version": "1.0.0",
-  "main": "index.js",
+  "type": "module",
+  "main": "server.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node server.js",
+    "test": "node --test"
   },
   "engines": {
     "node": "18.x"
