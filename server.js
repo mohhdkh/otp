@@ -1,5 +1,4 @@
 import express from 'express';
-import nodemailer from 'nodemailer';
 import cors from 'cors';
 import admin from 'firebase-admin';
 import dotenv from 'dotenv';
@@ -21,6 +20,7 @@ dotenv.config();
 const OTP_COLLECTION = 'otps';
 const RATE_LIMIT_COLLECTION = 'otpRateLimits';
 const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
+const APPS_SCRIPT_TIMEOUT_MS = 10 * 1000;
 
 const SEND_RATE_LIMITS = {
   perEmailAndPurpose: 5,
@@ -60,18 +60,16 @@ admin.initializeApp({
 const db = admin.firestore();
 const app = express();
 const port = process.env.PORT || 3000;
+const appsScriptUrl = requiredEnvironmentVariable('APPS_SCRIPT_URL');
+const appsScriptSecret = requiredEnvironmentVariable('APPS_SCRIPT_SECRET');
+
+if (new URL(appsScriptUrl).protocol !== 'https:') {
+  throw new Error('APPS_SCRIPT_URL must use HTTPS');
+}
 
 app.set('trust proxy', 1);
 app.use(cors());
 app.use(express.json({ limit: '16kb' }));
-
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: requiredEnvironmentVariable('GMAIL_USER'),
-    pass: requiredEnvironmentVariable('GMAIL_PASS'),
-  },
-});
 
 class RateLimitError extends Error {}
 
@@ -144,6 +142,32 @@ async function deleteOtpIfUnchanged(ref, otpHash) {
       transaction.delete(ref);
     }
   });
+}
+
+async function sendOtpWithAppsScript({ email, otp, purpose }) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), APPS_SCRIPT_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(appsScriptUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        secret: appsScriptSecret,
+        email,
+        code: otp,
+        purpose,
+      }),
+      signal: controller.signal,
+    });
+
+    const data = await response.json().catch(() => null);
+    if (!response.ok || data?.ok !== true) {
+      throw new Error('Apps Script rejected OTP delivery');
+    }
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function consumeOtp({ email, purpose, otp }) {
@@ -233,12 +257,7 @@ app.post('/send-otp', async (req, res) => {
     await batch.commit();
 
     try {
-      await transporter.sendMail({
-        from: process.env.GMAIL_USER,
-        to: email,
-        subject: 'رمز التحقق الخاص بك',
-        text: `رمز التحقق الخاص بك هو: ${otp}`,
-      });
+      await sendOtpWithAppsScript({ email, otp, purpose });
     } catch (error) {
       await deleteOtpIfUnchanged(otpRef, otpHash);
       throw error;
