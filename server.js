@@ -19,6 +19,10 @@ import {
   otpDocumentId,
   rateLimitDocumentId,
 } from './otp_security.js';
+import {
+  VERIFICATION_STATUS,
+  verifyOtpForPurpose,
+} from './verification_flow.js';
 
 dotenv.config();
 
@@ -186,7 +190,7 @@ async function deleteOtpIfUnchanged(ref, otpHash) {
   });
 }
 
-async function consumeOtp({ email, purpose, otp }) {
+async function consumeOtp({ email, purpose, otp, onValid }) {
   const ref = db.collection(OTP_COLLECTION).doc(otpDocumentId(email, purpose));
 
   return db.runTransaction(async (transaction) => {
@@ -205,6 +209,9 @@ async function consumeOtp({ email, purpose, otp }) {
     });
 
     if (evaluation.status === 'valid') {
+      if (onValid) {
+        await onValid(transaction);
+      }
       transaction.delete(ref);
       return 'valid';
     }
@@ -221,6 +228,35 @@ async function consumeOtp({ email, purpose, otp }) {
     }
 
     return evaluation.status;
+  });
+}
+
+async function findUserByEmail(email) {
+  try {
+    return await admin.auth().getUserByEmail(email);
+  } catch (error) {
+    if (error?.code === 'auth/user-not-found') {
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function consumeRegistrationOtpAndVerifyUser({
+  email,
+  purpose,
+  otp,
+  verifiedUid,
+}) {
+  const userRef = db.collection('users').doc(verifiedUid);
+
+  return consumeOtp({
+    email,
+    purpose,
+    otp,
+    onValid: (transaction) => {
+      transaction.update(userRef, { isVerified: true });
+    },
   });
 }
 
@@ -346,15 +382,24 @@ app.post('/verify-otp', async (req, res) => {
       },
     ]);
 
-    const result = await consumeOtp({ email, purpose, otp });
-    if (result !== 'valid') {
+    const result = await verifyOtpForPurpose(
+      { email, purpose, otp },
+      {
+        findUserByEmail,
+        consumeOtp,
+        consumeRegistrationOtpAndVerifyUser,
+        issueResetPasswordToken: async (uid) =>
+          admin.auth().createCustomToken(uid),
+      },
+    );
+
+    if (result.status !== VERIFICATION_STATUS.valid) {
       return invalidOtpResponse(res);
     }
 
     if (purpose === 'reset_password') {
       try {
-        const user = await admin.auth().getUserByEmail(email);
-        const token = await admin.auth().createCustomToken(user.uid);
+        const token = result.token;
         return res.json({
           success: true,
           message: 'تم التحقق بنجاح',
